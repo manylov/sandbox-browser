@@ -34,60 +34,21 @@ CHROME_ARGS=(
 
 [[ "${HEADLESS}" == "1" ]] && CHROME_ARGS+=("--headless=new" "--disable-gpu")
 
-# Proxy with auth support via Chrome extension
+# Proxy support: PROXY_URL=http://user:pass@host:port
 if [[ -n "${PROXY_URL:-}" ]]; then
-  # Parse: http://user:pass@host:port
-  PROXY_PROTO=$(echo "${PROXY_URL}" | sed -nE 's|(https?)://.*|\1|p')
   PROXY_AUTH=$(echo "${PROXY_URL}" | sed -nE 's|https?://([^@]+)@.*|\1|p')
   PROXY_HOSTPORT=$(echo "${PROXY_URL}" | sed -E 's|https?://([^@]+@)?||; s|/.*||')
-  PROXY_HOST=$(echo "${PROXY_HOSTPORT}" | cut -d: -f1)
-  PROXY_PORT=$(echo "${PROXY_HOSTPORT}" | cut -d: -f2)
-  
+
   if [[ -n "${PROXY_AUTH}" ]]; then
-    PROXY_USER=$(echo "${PROXY_AUTH}" | cut -d: -f1)
-    PROXY_PASS=$(echo "${PROXY_AUTH}" | cut -d: -f2-)
-    
-    # Create Chrome extension for proxy auth
-    PROXY_EXT_DIR="${HOME}/proxy-ext"
-    mkdir -p "${PROXY_EXT_DIR}"
-    
-    cat > "${PROXY_EXT_DIR}/manifest.json" << 'EXTEOF'
-{
-  "version": "1.0.0",
-  "manifest_version": 2,
-  "name": "Proxy Auth",
-  "permissions": ["proxy", "webRequest", "webRequestAuthProvider", "<all_urls>"],
-  "background": {"scripts": ["background.js"]}
-}
-EXTEOF
-
-    cat > "${PROXY_EXT_DIR}/background.js" << EXTEOF
-const config = {
-  mode: "fixed_servers",
-  rules: {
-    singleProxy: {
-      scheme: "${PROXY_PROTO:-http}",
-      host: "${PROXY_HOST}",
-      port: parseInt("${PROXY_PORT}")
-    },
-    bypassList: ["localhost","127.0.0.1"]
-  }
-};
-chrome.proxy.settings.set({value: config, scope: "regular"}, function() {});
-chrome.webRequest.onAuthRequired.addListener(
-  function(details) {
-    return {authCredentials: {username: "${PROXY_USER}", password: "${PROXY_PASS}"}};
-  },
-  {urls: ["<all_urls>"]},
-  ["blocking"]
-);
-EXTEOF
-
-    CHROME_ARGS+=("--load-extension=${PROXY_EXT_DIR}")
-    echo "Proxy enabled via extension: ${PROXY_HOST}:${PROXY_PORT}"
+    # Auth proxy: run local forwarder
+    LOCAL_PROXY_PORT="8888"
+    python3 /usr/local/bin/proxy-auth.py "${PROXY_HOSTPORT}" "${PROXY_AUTH}" "${LOCAL_PROXY_PORT}" &
+    sleep 1
+    CHROME_ARGS+=("--proxy-server=http://127.0.0.1:${LOCAL_PROXY_PORT}")
+    echo "Proxy: local:${LOCAL_PROXY_PORT} -> ${PROXY_HOSTPORT} (with auth)"
   else
     CHROME_ARGS+=("--proxy-server=${PROXY_URL}")
-    echo "Proxy enabled (no auth): ${PROXY_HOSTPORT}"
+    echo "Proxy: ${PROXY_HOSTPORT} (no auth)"
   fi
 fi
 
@@ -102,7 +63,7 @@ for _ in $(seq 1 50); do
 done
 echo "CDP ready on :${CHROME_CDP_PORT}"
 
-# Caddy: CDP proxy with Host rewrite
+# Caddy: CDP proxy
 cat > /tmp/Caddyfile << EOF
 {
 	auto_https off
@@ -115,9 +76,8 @@ cat > /tmp/Caddyfile << EOF
 }
 EOF
 caddy run --config /tmp/Caddyfile &
-echo "CDP proxy on :${CDP_PROXY_PORT}"
 
-# VNC + noVNC directly on COMBINED_PORT
+# VNC + noVNC
 if [[ "${HEADLESS}" != "1" ]]; then
   VNC_ARGS=(-display :1 -rfbport "${VNC_PORT}" -shared -forever -localhost)
   if [[ -n "${VNC_PASSWORD:-}" ]]; then
