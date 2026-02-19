@@ -114,10 +114,14 @@ cat > /tmp/Caddyfile << EOF
 }
 :${COMBINED_PORT} {
   handle /json/* {
-    reverse_proxy 127.0.0.1:${CHROME_CDP_PORT}
+    reverse_proxy 127.0.0.1:${CHROME_CDP_PORT} {
+      header_up Host 127.0.0.1
+    }
   }
   handle /devtools/* {
-    reverse_proxy 127.0.0.1:${CHROME_CDP_PORT}
+    reverse_proxy 127.0.0.1:${CHROME_CDP_PORT} {
+      header_up Host 127.0.0.1
+    }
   }
   handle {
     reverse_proxy 127.0.0.1:${WS_PORT}
