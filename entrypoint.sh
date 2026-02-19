@@ -33,7 +33,63 @@ CHROME_ARGS=(
 )
 
 [[ "${HEADLESS}" == "1" ]] && CHROME_ARGS+=("--headless=new" "--disable-gpu")
-[[ -n "${PROXY_URL:-}" ]] && CHROME_ARGS+=("--proxy-server=${PROXY_URL}") && echo "Proxy enabled"
+
+# Proxy with auth support via Chrome extension
+if [[ -n "${PROXY_URL:-}" ]]; then
+  # Parse: http://user:pass@host:port
+  PROXY_PROTO=$(echo "${PROXY_URL}" | sed -nE 's|(https?)://.*|\1|p')
+  PROXY_AUTH=$(echo "${PROXY_URL}" | sed -nE 's|https?://([^@]+)@.*|\1|p')
+  PROXY_HOSTPORT=$(echo "${PROXY_URL}" | sed -E 's|https?://([^@]+@)?||; s|/.*||')
+  PROXY_HOST=$(echo "${PROXY_HOSTPORT}" | cut -d: -f1)
+  PROXY_PORT=$(echo "${PROXY_HOSTPORT}" | cut -d: -f2)
+  
+  if [[ -n "${PROXY_AUTH}" ]]; then
+    PROXY_USER=$(echo "${PROXY_AUTH}" | cut -d: -f1)
+    PROXY_PASS=$(echo "${PROXY_AUTH}" | cut -d: -f2-)
+    
+    # Create Chrome extension for proxy auth
+    PROXY_EXT_DIR="${HOME}/proxy-ext"
+    mkdir -p "${PROXY_EXT_DIR}"
+    
+    cat > "${PROXY_EXT_DIR}/manifest.json" << 'EXTEOF'
+{
+  "version": "1.0.0",
+  "manifest_version": 2,
+  "name": "Proxy Auth",
+  "permissions": ["proxy", "webRequest", "webRequestAuthProvider", "<all_urls>"],
+  "background": {"scripts": ["background.js"]}
+}
+EXTEOF
+
+    cat > "${PROXY_EXT_DIR}/background.js" << EXTEOF
+const config = {
+  mode: "fixed_servers",
+  rules: {
+    singleProxy: {
+      scheme: "${PROXY_PROTO:-http}",
+      host: "${PROXY_HOST}",
+      port: parseInt("${PROXY_PORT}")
+    },
+    bypassList: ["localhost","127.0.0.1"]
+  }
+};
+chrome.proxy.settings.set({value: config, scope: "regular"}, function() {});
+chrome.webRequest.onAuthRequired.addListener(
+  function(details) {
+    return {authCredentials: {username: "${PROXY_USER}", password: "${PROXY_PASS}"}};
+  },
+  {urls: ["<all_urls>"]},
+  ["blocking"]
+);
+EXTEOF
+
+    CHROME_ARGS+=("--load-extension=${PROXY_EXT_DIR}")
+    echo "Proxy enabled via extension: ${PROXY_HOST}:${PROXY_PORT}"
+  else
+    CHROME_ARGS+=("--proxy-server=${PROXY_URL}")
+    echo "Proxy enabled (no auth): ${PROXY_HOSTPORT}"
+  fi
+fi
 
 echo "Starting Chromium..."
 chromium "${CHROME_ARGS[@]}" about:blank &
@@ -46,7 +102,7 @@ for _ in $(seq 1 50); do
 done
 echo "CDP ready on :${CHROME_CDP_PORT}"
 
-# Caddy: CDP proxy with Host rewrite on separate port
+# Caddy: CDP proxy with Host rewrite
 cat > /tmp/Caddyfile << EOF
 {
 	auto_https off
@@ -61,7 +117,7 @@ EOF
 caddy run --config /tmp/Caddyfile &
 echo "CDP proxy on :${CDP_PROXY_PORT}"
 
-# VNC + noVNC directly on COMBINED_PORT (no Caddy in between!)
+# VNC + noVNC directly on COMBINED_PORT
 if [[ "${HEADLESS}" != "1" ]]; then
   VNC_ARGS=(-display :1 -rfbport "${VNC_PORT}" -shared -forever -localhost)
   if [[ -n "${VNC_PASSWORD:-}" ]]; then
@@ -74,15 +130,8 @@ if [[ "${HEADLESS}" != "1" ]]; then
   fi
   x11vnc "${VNC_ARGS[@]}" &
   sleep 1
-
-  # websockify directly on COMBINED_PORT — Railway routes here
-  # This handles both HTTP (noVNC static files) and WebSocket (VNC data)
-  echo "Starting websockify on :${COMBINED_PORT}..."
   websockify --web /usr/share/novnc/ "${COMBINED_PORT}" "localhost:${VNC_PORT}" &
 fi
 
 echo "=== Sandbox Browser Ready ==="
-echo "noVNC: port ${COMBINED_PORT} (websockify direct)"
-echo "CDP:   port ${CDP_PROXY_PORT} (Caddy proxy)"
-
 wait ${CHROME_PID}
