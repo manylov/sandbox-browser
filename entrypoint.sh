@@ -95,7 +95,16 @@ echo "Caddy started (pid ${CADDY_PID})"
 # VNC + noVNC
 if [[ "${HEADLESS}" != "1" ]]; then
   echo "Starting VNC..."
-  x11vnc -display :1 -rfbport "${VNC_PORT}" -shared -forever -nopw -localhost &
+  VNC_ARGS=(-display :1 -rfbport "${VNC_PORT}" -shared -forever -localhost)
+  if [[ -n "${VNC_PASSWORD:-}" ]]; then
+    mkdir -p "${HOME}/.vnc"
+    x11vnc -storepasswd "${VNC_PASSWORD}" "${HOME}/.vnc/passwd"
+    VNC_ARGS+=(-rfbauth "${HOME}/.vnc/passwd")
+    echo "VNC password protection enabled"
+  else
+    VNC_ARGS+=(-nopw)
+  fi
+  x11vnc "${VNC_ARGS[@]}" &
   sleep 1
   echo "Starting noVNC on port ${NOVNC_INTERNAL_PORT}..."
   websockify --web /usr/share/novnc/ "${NOVNC_INTERNAL_PORT}" "localhost:${VNC_PORT}" &
