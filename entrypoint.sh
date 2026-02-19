@@ -16,6 +16,8 @@ HEADLESS="${OPENCLAW_BROWSER_HEADLESS:-0}"
 
 mkdir -p "${HOME}" "${HOME}/.chrome" "${XDG_CONFIG_HOME}" "${XDG_CACHE_HOME}"
 rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true
+# Clean up old proxy extension from previous deploys
+rm -rf "${HOME}/proxy-ext" "${HOME}/.chrome/Default/Extensions" 2>/dev/null || true
 
 echo "Starting Xvfb..."
 Xvfb :1 -screen 0 1280x800x24 -ac -nolisten tcp &
