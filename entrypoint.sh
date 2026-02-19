@@ -1,39 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+echo "=== Sandbox Browser Starting ==="
+echo "PORT=${PORT:-not set}"
+
 export DISPLAY=:1
 export HOME=/tmp/openclaw-home
 export XDG_CONFIG_HOME="${HOME}/.config"
 export XDG_CACHE_HOME="${HOME}/.cache"
 
-CDP_PORT="${OPENCLAW_BROWSER_CDP_PORT:-${CLAWDBOT_BROWSER_CDP_PORT:-9222}}"
-VNC_PORT="${OPENCLAW_BROWSER_VNC_PORT:-${CLAWDBOT_BROWSER_VNC_PORT:-5900}}"
-NOVNC_PORT="${OPENCLAW_BROWSER_NOVNC_PORT:-${CLAWDBOT_BROWSER_NOVNC_PORT:-6080}}"
+CHROME_CDP_PORT="9223"
+VNC_PORT="5900"
 NOVNC_INTERNAL_PORT="6081"
-ENABLE_NOVNC="${OPENCLAW_BROWSER_ENABLE_NOVNC:-${CLAWDBOT_BROWSER_ENABLE_NOVNC:-1}}"
-HEADLESS="${OPENCLAW_BROWSER_HEADLESS:-${CLAWDBOT_BROWSER_HEADLESS:-0}}"
-# Combined port for Railway (serves both CDP and noVNC)
-COMBINED_PORT="${PORT:-0}"
+COMBINED_PORT="${PORT:-6080}"
+HEADLESS="${OPENCLAW_BROWSER_HEADLESS:-0}"
 
 mkdir -p "${HOME}" "${HOME}/.chrome" "${XDG_CONFIG_HOME}" "${XDG_CACHE_HOME}"
 
 # Clean up stale X lock files
 rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true
 
+echo "Starting Xvfb..."
 Xvfb :1 -screen 0 1280x800x24 -ac -nolisten tcp &
+sleep 1
 
-if [[ "${HEADLESS}" == "1" ]]; then
-  CHROME_ARGS=(
-    "--headless=new"
-    "--disable-gpu"
-  )
-else
-  CHROME_ARGS=()
-fi
-
-CHROME_CDP_PORT="9223"
-
-CHROME_ARGS+=(
+# Chrome args
+CHROME_ARGS=(
   "--remote-debugging-address=127.0.0.1"
   "--remote-debugging-port=${CHROME_CDP_PORT}"
   "--user-data-dir=${HOME}/.chrome"
@@ -48,45 +40,38 @@ CHROME_ARGS+=(
   "--no-sandbox"
 )
 
-# === PROXY SUPPORT ===
+if [[ "${HEADLESS}" == "1" ]]; then
+  CHROME_ARGS+=("--headless=new" "--disable-gpu")
+fi
+
+# Proxy support
 if [[ -n "${PROXY_URL:-}" ]]; then
   CHROME_ARGS+=("--proxy-server=${PROXY_URL}")
   echo "Proxy enabled: ${PROXY_URL%%@*}@***"
 fi
 
-# === EXTRA CHROME FLAGS ===
-if [[ -n "${EXTRA_CHROME_FLAGS:-}" ]]; then
-  IFS=' ' read -ra EXTRA_FLAGS <<< "${EXTRA_CHROME_FLAGS}"
-  CHROME_ARGS+=("${EXTRA_FLAGS[@]}")
-fi
-
+echo "Starting Chromium..."
 chromium "${CHROME_ARGS[@]}" about:blank &
+CHROME_PID=$!
 
+# Wait for CDP
+echo "Waiting for CDP on port ${CHROME_CDP_PORT}..."
 for _ in $(seq 1 50); do
-  if curl -sS --max-time 1 "http://127.0.0.1:${CHROME_CDP_PORT}/json/version" >/dev/null; then
+  if curl -sS --max-time 1 "http://127.0.0.1:${CHROME_CDP_PORT}/json/version" >/dev/null 2>&1; then
+    echo "CDP ready!"
     break
   fi
-  sleep 0.1
+  sleep 0.2
 done
 
-# Caddy: CDP proxy on dedicated port (rewrite Host for Chrome)
+# Caddy config: single combined port
+echo "Configuring Caddy on port ${COMBINED_PORT}..."
 cat > /tmp/Caddyfile << EOF
 {
   auto_https off
   admin off
 }
-:${CDP_PORT} {
-  reverse_proxy 127.0.0.1:${CHROME_CDP_PORT} {
-    header_up Host 127.0.0.1
-  }
-}
-EOF
-
-# If COMBINED_PORT is set (Railway), add a combined endpoint
-if [[ "${COMBINED_PORT}" != "0" ]]; then
-cat >> /tmp/Caddyfile << EOF
 :${COMBINED_PORT} {
-  # CDP endpoints
   handle /json/* {
     reverse_proxy 127.0.0.1:${CHROME_CDP_PORT} {
       header_up Host 127.0.0.1
@@ -97,20 +82,29 @@ cat >> /tmp/Caddyfile << EOF
       header_up Host 127.0.0.1
     }
   }
-  # Everything else -> noVNC
   handle {
     reverse_proxy 127.0.0.1:${NOVNC_INTERNAL_PORT}
   }
 }
 EOF
-echo "Combined port ${COMBINED_PORT}: CDP (/json/*, /devtools/*) + noVNC (everything else)"
-fi
 
 caddy run --config /tmp/Caddyfile &
+CADDY_PID=$!
+echo "Caddy started (pid ${CADDY_PID})"
 
-if [[ "${ENABLE_NOVNC}" == "1" && "${HEADLESS}" != "1" ]]; then
+# VNC + noVNC
+if [[ "${HEADLESS}" != "1" ]]; then
+  echo "Starting VNC..."
   x11vnc -display :1 -rfbport "${VNC_PORT}" -shared -forever -nopw -localhost &
+  sleep 1
+  echo "Starting noVNC on port ${NOVNC_INTERNAL_PORT}..."
   websockify --web /usr/share/novnc/ "${NOVNC_INTERNAL_PORT}" "localhost:${VNC_PORT}" &
+  echo "noVNC ready!"
 fi
 
-wait -n
+echo "=== Sandbox Browser Ready ==="
+echo "CDP: http://localhost:${COMBINED_PORT}/json/version"
+echo "noVNC: http://localhost:${COMBINED_PORT}/"
+
+# Keep running - wait for Chrome to exit
+wait ${CHROME_PID}
