@@ -9,6 +9,7 @@ export XDG_CACHE_HOME="${HOME}/.cache"
 CDP_PORT="${OPENCLAW_BROWSER_CDP_PORT:-${CLAWDBOT_BROWSER_CDP_PORT:-9222}}"
 VNC_PORT="${OPENCLAW_BROWSER_VNC_PORT:-${CLAWDBOT_BROWSER_VNC_PORT:-5900}}"
 NOVNC_PORT="${OPENCLAW_BROWSER_NOVNC_PORT:-${CLAWDBOT_BROWSER_NOVNC_PORT:-6080}}"
+NOVNC_INTERNAL_PORT="6081"
 ENABLE_NOVNC="${OPENCLAW_BROWSER_ENABLE_NOVNC:-${CLAWDBOT_BROWSER_ENABLE_NOVNC:-1}}"
 HEADLESS="${OPENCLAW_BROWSER_HEADLESS:-${CLAWDBOT_BROWSER_HEADLESS:-0}}"
 # Combined port for Railway (serves both CDP and noVNC)
@@ -98,7 +99,7 @@ cat >> /tmp/Caddyfile << EOF
   }
   # Everything else -> noVNC
   handle {
-    reverse_proxy 127.0.0.1:${NOVNC_PORT}
+    reverse_proxy 127.0.0.1:${NOVNC_INTERNAL_PORT}
   }
 }
 EOF
@@ -109,7 +110,7 @@ caddy run --config /tmp/Caddyfile &
 
 if [[ "${ENABLE_NOVNC}" == "1" && "${HEADLESS}" != "1" ]]; then
   x11vnc -display :1 -rfbport "${VNC_PORT}" -shared -forever -nopw -localhost &
-  websockify --web /usr/share/novnc/ "${NOVNC_PORT}" "localhost:${VNC_PORT}" &
+  websockify --web /usr/share/novnc/ "${NOVNC_INTERNAL_PORT}" "localhost:${VNC_PORT}" &
 fi
 
 wait -n
